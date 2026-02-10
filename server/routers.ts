@@ -268,6 +268,11 @@ function extractMetadata(videoData: any, platform: string) {
   // This is a simplified version - you'd need to handle each platform's data structure
   if (platform === 'douyin' || platform === 'tiktok') {
     const aweme = videoData.aweme_detail || videoData;
+    // Douyin API returns duration in milliseconds, convert to seconds
+    const durationMs = aweme.video?.duration || 0;
+    const durationSec = durationMs > 0 ? Math.floor(durationMs / 1000) : 0;
+    console.log(`[Metadata] Douyin duration: ${durationMs}ms -> ${durationSec}s`);
+    
     return {
       videoId: aweme.aweme_id || '',
       title: aweme.desc || '',
@@ -276,7 +281,7 @@ function extractMetadata(videoData: any, platform: string) {
       authorId: aweme.author?.unique_id || '',
       coverUrl: aweme.video?.cover?.url_list?.[0] || '',
       playUrl: aweme.video?.play_addr?.url_list?.[0] || aweme.video?.download_addr?.url_list?.[0] || '',
-      duration: aweme.video?.duration || 0,
+      duration: durationSec,
       hashtags: aweme.text_extra?.map((tag: any) => tag.hashtag_name).filter(Boolean) || [],
       viewCount: aweme.statistics?.play_count || 0,
       likeCount: aweme.statistics?.digg_count || 0,
