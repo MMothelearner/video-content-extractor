@@ -206,6 +206,33 @@ export default function AnalysisDetail() {
           </Card>
         )}
 
+        {/* Video Transcript */}
+        {analysis.transcript && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="w-5 h-5" />
+                视频文案
+              </CardTitle>
+              <CardDescription>
+                从视频语音中提取的完整文字稿
+                {analysis.transcriptLanguage && (
+                  <span className="ml-2">
+                    · 语言: {analysis.transcriptLanguage}
+                  </span>
+                )}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="prose prose-sm max-w-none">
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                  {analysis.transcript}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Content Summary */}
         {analysis.contentSummary && (
           <Card className="mb-6">

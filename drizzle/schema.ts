@@ -61,6 +61,8 @@ export const videoAnalyses = mysqlTable("video_analyses", {
   
   // Analysis results
   subtitles: text("subtitles"), // Video subtitles if available
+  transcript: text("transcript"), // Speech-to-text transcript from audio
+  transcriptLanguage: varchar("transcriptLanguage", { length: 10 }), // Detected language of transcript
   ocrText: text("ocrText"), // Text extracted from video frames via OCR
   frameAnalysis: json("frameAnalysis").$type<Array<{
     timestamp: number;

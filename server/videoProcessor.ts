@@ -7,6 +7,8 @@ import axios from 'axios';
 import { invokeLLM } from './_core/llm';
 import { storagePut } from './storage';
 import { readFile } from 'fs/promises';
+import { transcribeAudio } from './_core/voiceTranscription';
+import { storagePut as uploadFile } from './storage';
 
 const execAsync = promisify(exec);
 
@@ -30,37 +32,143 @@ export async function downloadVideo(videoUrl: string, analysisId: number): Promi
   
   const videoPath = path.join(TEMP_DIR, `video_${analysisId}.mp4`);
   
+  // Validate URL
+  if (!videoUrl || videoUrl.trim() === '') {
+    throw new Error('Video URL is empty. The platform API may not have returned a valid download URL.');
+  }
+  
+  console.log(`[VideoProcessor] Downloading video from: ${videoUrl}`);
+  
+  // Try download with retries
+  const maxRetries = 2;
+  let lastError: any = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[VideoProcessor] Download attempt ${attempt}/${maxRetries}`);
+      
+      const response = await axios.get(videoUrl, {
+        responseType: 'arraybuffer',
+        timeout: 120000, // 2 minutes timeout
+        maxContentLength: 500 * 1024 * 1024, // 500MB max
+        maxRedirects: 5,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': videoUrl,
+          'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
+        },
+      });
+      
+      const buffer = Buffer.from(response.data);
+      console.log(`[VideoProcessor] Downloaded ${buffer.length} bytes (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+      
+      if (buffer.length < 1024) {
+        throw new Error('Downloaded file is too small, possibly invalid');
+      }
+      
+      await writeFile(videoPath, buffer);
+      console.log(`[VideoProcessor] Video saved to: ${videoPath}`);
+      return videoPath;
+      
+    } catch (error: any) {
+      lastError = error;
+      console.error(`[VideoProcessor] Download attempt ${attempt} failed:`, error.message || error);
+      
+      if (error.response) {
+        console.error('[VideoProcessor] Response status:', error.response.status);
+        console.error('[VideoProcessor] Response headers:', error.response.headers);
+        
+        // Don't retry on 4xx errors (client errors)
+        if (error.response.status >= 400 && error.response.status < 500) {
+          break;
+        }
+      }
+      
+      // Wait before retry (except on last attempt)
+      if (attempt < maxRetries) {
+        const waitTime = attempt * 2000; // 2s, 4s
+        console.log(`[VideoProcessor] Waiting ${waitTime}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+  }
+  
+  // All retries failed
+  const errorMsg = lastError?.response?.status 
+    ? `HTTP ${lastError.response.status}: ${lastError.message}` 
+    : lastError?.message || 'Unknown error';
+  throw new Error(`Failed to download video after ${maxRetries} attempts: ${errorMsg}`);
+}
+
+/**
+ * Extract audio from video file
+ */
+export async function extractAudioFromVideo(videoPath: string, analysisId: number): Promise<string> {
+  await ensureTempDir();
+  
+  const audioPath = path.join(TEMP_DIR, `audio_${analysisId}.mp3`);
+  
   try {
-    console.log(`[VideoProcessor] Downloading video from: ${videoUrl}`);
+    console.log(`[VideoProcessor] Extracting audio from: ${videoPath}`);
     
-    const response = await axios.get(videoUrl, {
-      responseType: 'arraybuffer',
-      timeout: 120000, // 2 minutes timeout
-      maxContentLength: 500 * 1024 * 1024, // 500MB max
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': videoUrl,
-        'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
-      },
+    // Extract audio using FFmpeg
+    // -vn: no video
+    // -acodec libmp3lame: use MP3 codec
+    // -ar 16000: 16kHz sample rate (optimal for speech recognition)
+    // -ac 1: mono channel
+    // -q:a 2: quality level 2 (good quality, small file)
+    await execAsync(
+      `ffmpeg -i "${videoPath}" -vn -acodec libmp3lame -ar 16000 -ac 1 -q:a 2 "${audioPath}" -y`,
+      { timeout: 60000 } // 1 minute timeout
+    );
+    
+    if (!existsSync(audioPath)) {
+      throw new Error('Audio extraction failed - output file not created');
+    }
+    
+    console.log(`[VideoProcessor] Audio extracted to: ${audioPath}`);
+    return audioPath;
+  } catch (error: any) {
+    console.error('[VideoProcessor] Audio extraction error:', error.message || error);
+    throw new Error(`Failed to extract audio: ${error.message || 'Unknown error'}`);
+  }
+}
+
+/**
+ * Transcribe audio to text using Manus voice transcription service
+ */
+export async function transcribeVideoAudio(audioPath: string): Promise<{ text: string; language: string }> {
+  try {
+    console.log(`[VideoProcessor] Starting audio transcription: ${audioPath}`);
+    
+    // Upload audio file to S3 to get a URL
+    const audioBuffer = await readFile(audioPath);
+    const audioKey = `video-analysis/temp/${path.basename(audioPath)}`;
+    const uploadResult = await uploadFile(audioKey, audioBuffer, 'audio/mpeg');
+    
+    console.log(`[VideoProcessor] Audio uploaded to: ${uploadResult.url}`);
+    
+    // Transcribe using Manus service
+    const transcriptionResult = await transcribeAudio({
+      audioUrl: uploadResult.url,
+      language: 'zh', // Default to Chinese, service will auto-detect
     });
     
-    const buffer = Buffer.from(response.data);
-    console.log(`[VideoProcessor] Downloaded ${buffer.length} bytes`);
-    
-    if (buffer.length < 1024) {
-      throw new Error('Downloaded file is too small, possibly invalid');
+    // Check if transcription failed
+    if ('error' in transcriptionResult) {
+      console.error('[VideoProcessor] Transcription error:', transcriptionResult);
+      throw new Error(transcriptionResult.error);
     }
     
-    await writeFile(videoPath, buffer);
-    console.log(`[VideoProcessor] Video saved to: ${videoPath}`);
-    return videoPath;
+    console.log(`[VideoProcessor] Transcription completed. Language: ${transcriptionResult.language}, Length: ${transcriptionResult.text.length} chars`);
+    
+    return {
+      text: transcriptionResult.text,
+      language: transcriptionResult.language,
+    };
   } catch (error: any) {
-    console.error('[VideoProcessor] Download error:', error.message || error);
-    if (error.response) {
-      console.error('[VideoProcessor] Response status:', error.response.status);
-      console.error('[VideoProcessor] Response headers:', error.response.headers);
-    }
-    throw new Error(`Failed to download video: ${error.message || 'Unknown error'}`);
+    console.error('[VideoProcessor] Audio transcription error:', error.message || error);
+    throw new Error(`Failed to transcribe audio: ${error.message || 'Unknown error'}`);
   }
 }
 
@@ -268,7 +376,8 @@ export async function analyzeFramesWithAI(
 export async function generateContentSummary(
   videoMetadata: any,
   frameAnalysis: any[],
-  ocrText: string
+  ocrText: string,
+  transcript?: string
 ): Promise<{ summary: string; keyPoints: string[] }> {
   try {
     const prompt = `请基于以下视频信息生成内容摘要和关键要点：
@@ -277,15 +386,18 @@ export async function generateContentSummary(
 视频描述：${videoMetadata.description || '无'}
 作者：${videoMetadata.author || '未知'}
 
-画面分析：
+${transcript ? `语音文字稿（最重要）：
+${transcript}
+
+` : ''}画面分析：
 ${frameAnalysis.map((f, i) => `[${f.timestamp}s] 场景：${f.scene}\n描述：${f.description}\n物体：${f.objects.join(', ')}`).join('\n\n')}
 
 画面文字（OCR）：
 ${ocrText || '无文字识别'}
 
 请生成：
-1. 一段200字以内的内容摘要
-2. 3-5个关键要点
+1. 一段200字以内的内容摘要${transcript ? '（主要基于语音文字稿）' : ''}
+2. 3-5个关键要点${transcript ? '（提取语音中的核心信息）' : ''}
 
 返回JSON格式：{"summary": "摘要内容", "keyPoints": ["要点1", "要点2", "要点3"]}`;
 
@@ -332,11 +444,19 @@ ${ocrText || '无文字识别'}
  */
 export async function cleanupTempFiles(analysisId: number): Promise<void> {
   try {
+    // Clean up video file
     const videoPath = path.join(TEMP_DIR, `video_${analysisId}.mp4`);
     if (existsSync(videoPath)) {
       await unlink(videoPath);
     }
     
+    // Clean up audio file
+    const audioPath = path.join(TEMP_DIR, `audio_${analysisId}.mp3`);
+    if (existsSync(audioPath)) {
+      await unlink(audioPath);
+    }
+    
+    // Clean up frame files
     for (let i = 1; i <= FRAMES_PER_VIDEO; i++) {
       const framePath = path.join(TEMP_DIR, `frame_${analysisId}_${i}.jpg`);
       if (existsSync(framePath)) {
